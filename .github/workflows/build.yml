@@ -1,0 +1,113 @@
+name: Build VyreOrbit (full, arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        type: choice
+        options: [Release, Debug]
+        default: Release
+      upstream_ref:
+        description: "exteraGram tag/commit the patch was made for"
+        default: "13.2.2"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      - name: Unpack patch from VyreOrbit-build.zip
+        run: |
+          unzip -q -o VyreOrbit-build.zip -d _pkg
+          ls -la _pkg/VyreOrbit-build/patches
+
+      - name: Fetch exteraGram sources (with submodules)
+        run: |
+          REF="${{ inputs.upstream_ref }}"
+          for cand in "$REF" "v$REF"; do
+            if git clone --depth 1 --branch "$cand" --recurse-submodules --shallow-submodules \
+                 https://github.com/exteraSquad/exteraGram.git src; then OK=1; break; fi
+            rm -rf src
+          done
+          if [ -z "$OK" ]; then
+            echo "::error::Tag '$REF' not found in exteraSquad/exteraGram. Run again and enter an existing tag or commit in 'upstream_ref'."
+            exit 1
+          fi
+          cd src
+          git apply --binary --whitespace=nowarn ../_pkg/VyreOrbit-build/patches/vyreorbit.patch
+          git status --short | head -50
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: "3.11"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK, NDK, CMake
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+          sdkmanager "cmake;4.0.2" || sdkmanager "cmake;3.31.6"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: src
+
+      - name: Create API_KEYS and keystore
+        working-directory: src
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_HASH: ${{ secrets.APP_HASH }}
+          MAPS_V2_API: ${{ secrets.MAPS_V2_API }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          SIGNING_KEY_STORE_PASSWORD: ${{ secrets.SIGNING_KEY_STORE_PASSWORD }}
+          SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        run: |
+          for v in APP_ID APP_HASH KEYSTORE_BASE64 SIGNING_KEY_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
+            if [ -z "${!v}" ]; then echo "::error::Secret $v is not set"; exit 1; fi
+          done
+          {
+            echo "APP_ID = ${APP_ID}"
+            echo "APP_HASH = \"${APP_HASH}\""
+            echo "MAPS_V2_API = ${MAPS_V2_API:-none}"
+            echo "SIGNING_KEY_PASSWORD = ${SIGNING_KEY_PASSWORD}"
+            echo "SIGNING_KEY_ALIAS = ${SIGNING_KEY_ALIAS}"
+            echo "SIGNING_KEY_STORE_PASSWORD = ${SIGNING_KEY_STORE_PASSWORD}"
+          } > API_KEYS
+          mkdir -p TMessagesProj/config
+          echo "$KEYSTORE_BASE64" | base64 -d > TMessagesProj/config/exteraGram.jks
+
+      - name: Build
+        working-directory: src
+        env:
+          BUILD_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :TMessagesProj:assembleFullArm64${{ inputs.build_type }}
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find src/TMessagesProj/build/outputs/apk -name '*.apk' -exec cp {} out/ \;
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VyreOrbit-full-arm64-${{ inputs.build_type }}
+          path: out/*.apk
+          if-no-files-found: error
