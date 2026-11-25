@@ -16,6 +16,10 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
+    env:
+      # The plugin analyzer is downloaded from GitHub during the build; without a token GitHub answers 403 (rate limit)
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Free disk space
         run: |
@@ -132,6 +136,18 @@ jobs:
             || { echo "::error::Keystore check failed: wrong KEYSTORE_BASE64, alias or password"; exit 1; }
           echo "Keystore OK"
 
+      - name: Preflight - GitHub API and analyzer release reachable
+        run: |
+          CODE=$(curl -s -o /tmp/rel.json -w '%{http_code}' \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/exteraSquad/plugins-pysdk-builds/releases/latest)
+          echo "analyzer releases HTTP $CODE"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Cannot read exteraSquad/plugins-pysdk-builds releases (HTTP $CODE). The plugin analyzer cannot be downloaded."
+            head -c 500 /tmp/rel.json; exit 1
+          fi
+          curl -s -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/rate_limit | head -c 300; echo
+
       - name: Gradle dry run (checks configuration without compiling)
         working-directory: src
         env:
@@ -157,4 +173,4 @@ jobs:
         with:
           name: VyreOrbit-full-arm64-${{ inputs.build_type }}
           path: out/*.apk
-          if-no-files-found: erroror
+          if-no-files-found: error
