@@ -15,11 +15,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 330
     steps:
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
           df -h /
 
       - uses: actions/checkout@v4
@@ -32,6 +32,7 @@ jobs:
       - name: Fetch exteraGram sources (with submodules)
         run: |
           REF="${{ inputs.upstream_ref }}"
+          OK=""
           for cand in "$REF" "v$REF"; do
             if git clone --depth 1 --branch "$cand" --recurse-submodules --shallow-submodules \
                  https://github.com/exteraSquad/exteraGram.git src; then OK=1; break; fi
@@ -63,9 +64,42 @@ jobs:
           "$SDKM" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
           "$SDKM" "cmake;4.0.2" || "$SDKM" "cmake;3.31.6"
 
+      - name: Preflight checks (fast fail before the long build)
+        working-directory: src
+        env:
+          BUILD_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          FAIL=""
+          echo "== machine =="
+          nproc
+          free -g | head -2
+          df -h / | tail -1
+          MEM_GB=$(awk '/MemTotal/ {printf "%d", $2/1024/1024}' /proc/meminfo)
+          if [ "$MEM_GB" -lt 12 ]; then
+            echo "::warning::Runner has only ${MEM_GB} GB RAM (private repos get small runners). If the build dies with OutOfMemory, make the repository public: 4 cores and 16 GB RAM."
+          fi
+          echo "== tools =="
+          java -version 2>&1 | head -1
+          PYV=$("$BUILD_PYTHON" --version 2>&1)
+          echo "$PYV"
+          case "$PYV" in "Python 3.11"*) ;; *) echo "::error::Python 3.11 required, got: $PYV"; FAIL=1;; esac
+          [ -d "$ANDROID_HOME/ndk/29.0.14206865" ] || { echo "::error::NDK 29.0.14206865 is not installed"; FAIL=1; }
+          ls "$ANDROID_HOME/cmake" || { echo "::error::CMake is not installed"; FAIL=1; }
+          echo "== submodules =="
+          for d in TMessagesProj/jni/td TMessagesProj/jni/third_party/ffmpeg TMessagesProj/jni/third_party/boringssl TMessagesProj/jni/tgcalls TMessagesProj/lib/jlatexmath TMessagesProj_Modules/media; do
+            n=$(ls -A "$d" 2>/dev/null | wc -l)
+            echo "$d: $n entries"
+            [ "$n" -gt 0 ] || { echo "::error::Submodule $d is empty"; FAIL=1; }
+          done
+          echo "== patch =="
+          grep -q '^APP_PACKAGE=app.vyreorbit.messenger' gradle.properties || { echo "::error::Patch was not applied (APP_PACKAGE)"; FAIL=1; }
+          grep -q '>VyreOrbit<' TMessagesProj/src/main/res/values/strings.xml || { echo "::error::Patch was not applied (AppName)"; FAIL=1; }
+          [ -z "$FAIL" ] || exit 1
+          echo "Preflight OK"
+
       - uses: gradle/actions/setup-gradle@v4
         with:
-          build-root-directory: src
+          validate-wrappers: false
 
       - name: Create API_KEYS and keystore
         working-directory: src
@@ -81,6 +115,8 @@ jobs:
           for v in APP_ID APP_HASH KEYSTORE_BASE64 SIGNING_KEY_STORE_PASSWORD SIGNING_KEY_ALIAS SIGNING_KEY_PASSWORD; do
             if [ -z "${!v}" ]; then echo "::error::Secret $v is not set"; exit 1; fi
           done
+          case "$APP_ID" in *[!0-9]*) echo "::error::APP_ID must contain digits only"; exit 1;; esac
+          [ "${#APP_HASH}" -eq 32 ] || { echo "::error::APP_HASH must be 32 characters (got ${#APP_HASH}). No quotes, no spaces."; exit 1; }
           {
             echo "APP_ID = ${APP_ID}"
             echo "APP_HASH = \"${APP_HASH}\""
@@ -90,14 +126,25 @@ jobs:
             echo "SIGNING_KEY_STORE_PASSWORD = ${SIGNING_KEY_STORE_PASSWORD}"
           } > API_KEYS
           mkdir -p TMessagesProj/config
-          echo "$KEYSTORE_BASE64" | base64 -d > TMessagesProj/config/exteraGram.jks
+          echo "$KEYSTORE_BASE64" | tr -d '[:space:]' | base64 -d > TMessagesProj/config/exteraGram.jks
+          keytool -list -keystore TMessagesProj/config/exteraGram.jks \
+            -storepass "$SIGNING_KEY_STORE_PASSWORD" -alias "$SIGNING_KEY_ALIAS" >/dev/null \
+            || { echo "::error::Keystore check failed: wrong KEYSTORE_BASE64, alias or password"; exit 1; }
+          echo "Keystore OK"
+
+      - name: Gradle dry run (checks configuration without compiling)
+        working-directory: src
+        env:
+          BUILD_PYTHON: ${{ steps.py.outputs.python-path }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --dry-run :TMessagesProj:assembleFullArm64${{ inputs.build_type }}
 
       - name: Build
         working-directory: src
         env:
           BUILD_PYTHON: ${{ steps.py.outputs.python-path }}
         run: |
-          chmod +x gradlew
           ./gradlew --no-daemon --stacktrace :TMessagesProj:assembleFullArm64${{ inputs.build_type }}
 
       - name: Collect APK
@@ -110,4 +157,4 @@ jobs:
         with:
           name: VyreOrbit-full-arm64-${{ inputs.build_type }}
           path: out/*.apk
-          if-no-files-found: errorror
+          if-no-files-found: erroror
