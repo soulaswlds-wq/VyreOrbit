@@ -55,13 +55,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: android-actions/setup-android@v3
-
       - name: Install SDK, NDK, CMake
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
-          sdkmanager "cmake;4.0.2" || sdkmanager "cmake;3.31.6"
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          ls "$SDKM"
+          yes | "$SDKM" --licenses >/dev/null || true
+          "$SDKM" "platforms;android-36" "build-tools;36.0.0" "ndk;29.0.14206865"
+          "$SDKM" "cmake;4.0.2" || "$SDKM" "cmake;3.31.6"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
@@ -110,4 +110,4 @@ jobs:
         with:
           name: VyreOrbit-full-arm64-${{ inputs.build_type }}
           path: out/*.apk
-          if-no-files-found: error
+          if-no-files-found: errorror
